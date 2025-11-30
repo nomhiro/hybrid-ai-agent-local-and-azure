@@ -42,10 +42,10 @@ FINANCIAL_PLANNER_INSTRUCTIONS = """
 - 重要な金融判断は必ず資格を持つファイナンシャルプランナーに相談してください
 
 【一般的な動作】
-1. ユーザーから資産情報や家族情報が提供された場合：
-   - まず`analyze_financial_assets`ツールで資産データを分析
-   - 次に`analyze_life_plan`ツールでライフプランを分析
-   - 両方の分析結果を統合してアドバイスを生成
+1. ユーザーから資産運用やライフプランについて相談があった場合：
+   - 資産分析には`analyze_financial_assets`ツールを呼び出す
+   - ライフプラン分析には`analyze_life_plan`ツールを呼び出す
+   - これらのツールはローカルで機密データを処理し、匿名化されたサマリーのみを返します
 
 2. 分析結果に基づいて以下を提供：
    - 資産配分の現状評価（良い点・改善点）
@@ -60,11 +60,12 @@ FINANCIAL_PLANNER_INSTRUCTIONS = """
    - 税務・法律に関する専門的な助言
 
 【ツールの使用方法】
-- ユーザーが資産情報をJSONまたはテキストで提供した場合：
+- ユーザーが資産運用について相談した場合：
   → `analyze_financial_assets`ツールを呼び出す
-- ユーザーが家族構成や将来計画を提供した場合：
+- ユーザーが家族構成や将来計画について相談した場合：
   → `analyze_life_plan`ツールを呼び出す
-- 両方の情報がある場合は両方のツールを順に呼び出す
+- ツールを呼び出す際は、ユーザーの質問や相談内容をそのまま引数として渡してください。
+  具体的な金額や個人情報を引数に含める必要はありません（ローカルで自動的に読み込まれます）。
 
 【出力形式】
 - 平易な日本語で説明
@@ -147,13 +148,17 @@ LOCAL_LIFE_PLAN_PROMPT = """
         "ユーザーのGPU上で動作するローカルモデルを使用して、"
         "金融資産データを匿名化・構造化します。"
         "具体的な金額は外部に送信せず、割合と分類のみを出力します。"
+        "資産分析が必要な場合に使用してください。"
     ),
 )
 def analyze_financial_assets(
-    assets_json: Annotated[str, Field(description="金融資産データのJSON文字列")],
+    user_query: Annotated[str, Field(description="ユーザーの質問や相談内容。資産運用に関する質問を含めてください。")],
 ) -> Dict[str, Any]:
     """
     ツール: Foundry Local (Phi-4-mini) を使用して資産データを分析する。
+
+    機密データ（金融資産）はローカルファイルから直接読み込み、
+    クラウドには匿名化・構造化されたサマリーのみを返す。
 
     JSON互換のdictを返す：
     - total_assets_category: 資産総額のカテゴリ
@@ -161,10 +166,25 @@ def analyze_financial_assets(
     - risk_assessment: リスク評価
     - nisa_utilization: NISA活用状況
     """
+    # ローカルファイルから機密データを読み込む
+    data_file = Path(__file__).parent / "data" / "my_assets.json"
+    if data_file.exists():
+        assets_json = data_file.read_text(encoding="utf-8").strip()
+    else:
+        return {
+            "total_assets_category": "データなし",
+            "asset_allocation": {},
+            "risk_assessment": {"observations": ["金融資産データが見つかりません。"]},
+            "nisa_utilization": {}
+        }
+
+    # ユーザーの質問と資産データを組み合わせてローカルLLMに渡す
+    combined_content = f"【ユーザーの質問】\n{user_query}\n\n【金融資産データ】\n{assets_json}"
+
     # Foundry Localを呼び出し（入力はllm_loggerに記録される）
     response, log_entry = call_local_model(
         system_prompt=LOCAL_ASSET_ANALYSIS_PROMPT,
-        user_content=assets_json,
+        user_content=combined_content,
         max_tokens=1024,
         temperature=0.2,
         tool_name="analyze_financial_assets",
@@ -190,13 +210,17 @@ def analyze_financial_assets(
         "ユーザーのGPU上で動作するローカルモデルを使用して、"
         "家族構成と将来計画を匿名化・構造化します。"
         "具体的な年齢や名前は外部に送信せず、ライフステージと時期のみを出力します。"
+        "ライフプラン分析が必要な場合に使用してください。"
     ),
 )
 def analyze_life_plan(
-    family_json: Annotated[str, Field(description="家族構成と将来計画のJSON文字列")],
+    user_query: Annotated[str, Field(description="ユーザーの質問や相談内容。ライフプランに関する質問を含めてください。")],
 ) -> Dict[str, Any]:
     """
     ツール: Foundry Local (Phi-4-mini) を使用してライフプランを分析する。
+
+    機密データ（家族構成・将来計画）はローカルファイルから直接読み込み、
+    クラウドには匿名化・構造化されたサマリーのみを返す。
 
     JSON互換のdictを返す：
     - household_type: 世帯タイプ
@@ -205,10 +229,26 @@ def analyze_life_plan(
     - key_financial_milestones: 重要な財務マイルストーン
     - risk_factors: リスク要因
     """
+    # ローカルファイルから機密データを読み込む
+    data_file = Path(__file__).parent / "data" / "family_profile.json"
+    if data_file.exists():
+        family_json = data_file.read_text(encoding="utf-8").strip()
+    else:
+        return {
+            "household_type": "データなし",
+            "income_structure": {},
+            "life_stage_timeline": [],
+            "key_financial_milestones": [],
+            "risk_factors": ["家族構成データが見つかりません。"]
+        }
+
+    # ユーザーの質問と家族データを組み合わせてローカルLLMに渡す
+    combined_content = f"【ユーザーの質問】\n{user_query}\n\n【家族構成・将来計画】\n{family_json}"
+
     # Foundry Localを呼び出し（入力はllm_loggerに記録される）
     response, log_entry = call_local_model(
         system_prompt=LOCAL_LIFE_PLAN_PROMPT,
-        user_content=family_json,
+        user_content=combined_content,
         max_tokens=1024,
         temperature=0.2,
         tool_name="analyze_life_plan",

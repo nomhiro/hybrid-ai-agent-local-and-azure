@@ -46,9 +46,11 @@ SYMPTOM_CHECKER_INSTRUCTIONS = """
 - 必ず次の文で終わってください：「これは医学的アドバイスではありません。」
 
 ツールの使用方法：
-- ユーザーが検査レポートのテキストを提供した場合、または「以下の検査結果」「検査結果を参照」と言及した場合、
-  トリアージのガイダンスを提供する前に、必ず`summarize_lab_report`ツールを呼び出して
-  検査データを構造化データに変換してください。
+- ユーザーが検査結果について言及した場合、または健康状態の評価を求めた場合、
+  必ず`summarize_lab_report`ツールを呼び出してください。
+- このツールはユーザーのローカル環境で検査データを処理し、匿名化されたサマリーのみを返します。
+- ツールを呼び出す際は、ユーザーの質問や症状をそのまま引数として渡してください。
+  具体的な検査データを引数に含める必要はありません（ローカルで自動的に読み込まれます）。
 - ツールの結果をコンテキストとして使用しますが、生のJSONを直接公開しないでください。
   代わりに、主要な異常所見を平易な言葉で要約してください。
 """.strip()
@@ -86,24 +88,41 @@ LOCAL_LAB_SYSTEM_PROMPT = """
 @ai_function(
     name="summarize_lab_report",
     description=(
-        "ユーザーのGPU上で動作するローカルモデルを使用して、生の検査レポートを構造化された異常値に要約します。"
-        "ユーザーが検査結果をテキストで提供した場合に使用してください。"
+        "ユーザーのGPU上で動作するローカルモデルを使用して、検査レポートを構造化された異常値に要約します。"
+        "検査結果の分析が必要な場合に使用してください。"
+        "機密データはローカルで処理され、匿名化されたサマリーのみが返されます。"
     ),
 )
 def summarize_lab_report(
-    lab_text: Annotated[str, Field(description="要約する検査レポートの生テキスト。")],
+    user_query: Annotated[str, Field(description="ユーザーの質問や症状の説明。検査結果に関連する質問を含めてください。")],
 ) -> Dict[str, Any]:
     """
     ツール: Foundry Local (Phi-4-mini) を使用してユーザーのGPU上で検査レポートを要約する。
+
+    機密データ（検査レポート）はローカルファイルから直接読み込み、
+    クラウドには匿名化・構造化されたサマリーのみを返す。
 
     JSON互換のdictを返す：
     - overall_assessment: 短いテキスト要約
     - notable_abnormal_results: 異常検査結果のオブジェクトリスト
     """
+    # ローカルファイルから機密データを読み込む
+    data_file = Path(__file__).parent / "data" / "lab_report.txt"
+    if data_file.exists():
+        lab_text = data_file.read_text(encoding="utf-8").strip()
+    else:
+        return {
+            "overall_assessment": "検査レポートが見つかりません。",
+            "notable_abnormal_results": []
+        }
+
+    # ユーザーの質問と検査データを組み合わせてローカルLLMに渡す
+    combined_content = f"【ユーザーの質問】\n{user_query}\n\n【検査レポート】\n{lab_text}"
+
     # Foundry Localを呼び出し（入力はllm_loggerに記録される）
     response, log_entry = call_local_model(
         system_prompt=LOCAL_LAB_SYSTEM_PROMPT,
-        user_content=lab_text,
+        user_content=combined_content,
         max_tokens=1024,
         temperature=0.2,
         tool_name="summarize_lab_report",

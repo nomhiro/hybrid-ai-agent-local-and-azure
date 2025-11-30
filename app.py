@@ -33,33 +33,21 @@ from medical.agent import (
 
 def append_runtime_data(message: str, agent_type: str) -> str:
     """
-    実行時に機密データをメッセージ末尾に追記する。
+    ユーザーメッセージをそのまま返す。
 
-    ユーザーには見せないデータ（金融資産、検査結果など）を
-    実行時にのみプロンプト末尾に追加する。
+    機密データ（金融資産、検査結果など）はローカルツール内で
+    直接ファイルから読み込むため、ここでは追記しない。
+    これにより、Azure AIエージェントには個人情報が送信されない。
 
     Args:
         message: ユーザーが入力したメッセージ
         agent_type: エージェントタイプ（"finance" または "medical"）
 
     Returns:
-        機密データが追記されたメッセージ
+        ユーザーメッセージ（機密データなし）
     """
-    base_dir = Path(__file__).parent
-    data_dir = base_dir / agent_type / "data"
-
-    # エージェントタイプに応じて追記するデータを決定
-    if agent_type == "finance":
-        data_file = data_dir / "my_assets.json"
-        if data_file.exists():
-            assets_data = data_file.read_text(encoding="utf-8").strip()
-            message += f"\n\n---\n【私の金融資産】\n{assets_data}"
-    elif agent_type == "medical":
-        data_file = data_dir / "lab_report.txt"
-        if data_file.exists():
-            lab_data = data_file.read_text(encoding="utf-8").strip()
-            message += f"\n\n---\n【検査結果】\n{lab_data}"
-
+    # 機密データはローカルツール内で直接読み込むため、
+    # ユーザーメッセージはそのまま返す
     return message
 
 
@@ -123,6 +111,26 @@ async def run_agent_stream(agent_type: str, user_message: str, placeholders: dic
         tools = [summarize_lab_report]
         name = "hybrid-symptom-checker"
 
+    # --- システムメッセージとユーザーメッセージを先に表示 ---
+    input_display = []
+    input_display.append("### System Prompt (Instructions)")
+    prompt_preview = instructions[:500]
+    if len(instructions) > 500:
+        prompt_preview += "..."
+    input_display.append(f"```\n{prompt_preview}\n```")
+
+    input_display.append("### User Message")
+    user_preview = expanded_message[:800]
+    if len(expanded_message) > 800:
+        user_preview += "..."
+    input_display.append(f"```\n{user_preview}\n```")
+
+    input_display.append("---")
+    input_display.append("### Response")
+
+    base_display = "\n".join(input_display)
+    placeholders["azure_llm"].markdown(base_display)
+
     async with (
         AzureCliCredential() as credential,
         ChatAgent(
@@ -139,7 +147,7 @@ async def run_agent_stream(agent_type: str, user_message: str, placeholders: dic
             # ストリーミングテキストを表示
             if update.text:
                 full_text += update.text
-                placeholders["azure_llm"].markdown(full_text + "▌")
+                placeholders["azure_llm"].markdown(base_display + "\n" + full_text + "▌")
 
             # ツール呼び出しを検出して表示
             for content in update.contents or []:
@@ -160,7 +168,7 @@ async def run_agent_stream(agent_type: str, user_message: str, placeholders: dic
                         )
 
         # 最終結果（カーソルなし）
-        placeholders["azure_llm"].markdown(full_text)
+        placeholders["azure_llm"].markdown(base_display + "\n" + full_text)
         return full_text
 
 
