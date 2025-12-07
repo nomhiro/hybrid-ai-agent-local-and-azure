@@ -1,38 +1,27 @@
 """
-医療トリアージエージェント
+医療診断エージェント
 
-ローカルLLM（Foundry Local + Phi-4-mini）とクラウドLLM（Azure AI Agent Framework）を
-組み合わせたハイブリッド型医療トリアージ支援システム。
+Azure AI Foundry Agent + ローカルMCPサーバー（Foundry Local + Phi-4-mini）を
+組み合わせたハイブリッド型医療診断支援システム。
 
-機能:
-- 症状チェッカー（クラウド）: 非緊急トリアージのガイダンス提供
-- 検査レポート要約（ローカル）: 機密医療データのローカル処理
+アーキテクチャ:
+- クラウド側（Azure AI Foundry Agent）: 症状チェッカーとして診断ガイダンス提供
+- ローカル側（MCPサーバー）: 機密患者データの処理、匿名化サマリー生成
 
 プライバシー保護:
-- 検査レポートの具体的な患者ID、検査値はローカルで処理
-- クラウドには匿名化・構造化された要約のみ送信
+- ユーザーの症状のみがクラウドに送信される（個人情報なし）
+- 患者の医療背景（アレルギー、既往歴、服用薬）はローカルMCPサーバーで処理
+- クラウドには匿名化・構造化されたサマリーのみ送信
+
+MCPツール:
+- get_patient_background: ローカルで患者背景を処理し、匿名化サマリーを返す
 """
-
-from typing import Annotated, Any, Dict
-
-from pydantic import Field
-
-from agent_framework import ai_function
-
-# 共通モジュールをインポート
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from common.foundry_local import call_local_model, extract_content
-from common.llm_logger import llm_logger
-from common.utils import parse_json_response
 
 
 # ========= クラウド症状チェッカー指示 =========
 
 SYMPTOM_CHECKER_INSTRUCTIONS = """
-あなたは非緊急トリアージのための慎重な症状チェッカーアシスタントです。
+あなたは非緊急診断のための慎重な症状チェッカーアシスタントです。
 
 一般的な動作：
 - あなたは医療従事者ではありません。医学的診断を提供したり、治療を処方したりしないでください。
@@ -46,97 +35,11 @@ SYMPTOM_CHECKER_INSTRUCTIONS = """
 - 必ず次の文で終わってください：「これは医学的アドバイスではありません。」
 
 ツールの使用方法：
-- ユーザーが検査結果について言及した場合、または健康状態の評価を求めた場合、
-  必ず`summarize_lab_report`ツールを呼び出してください。
-- このツールはユーザーのローカル環境で検査データを処理し、匿名化されたサマリーのみを返します。
+- ユーザーが症状を報告した場合、必ず`get_patient_background`ツールを呼び出してください。
+- このツールはユーザーのローカル環境で患者の医療背景（アレルギー、既往歴、服用薬など）を処理し、
+  匿名化されたサマリーのみを返します。
+- 機密性の高い患者データはローカルに留まり、クラウドには送信されません。
 - ツールを呼び出す際は、ユーザーの質問や症状をそのまま引数として渡してください。
-  具体的な検査データを引数に含める必要はありません（ローカルで自動的に読み込まれます）。
 - ツールの結果をコンテキストとして使用しますが、生のJSONを直接公開しないでください。
-  代わりに、主要な異常所見を平易な言葉で要約してください。
+  代わりに、患者背景を考慮した適切なアドバイスを提供してください。
 """.strip()
-
-
-# ========= ローカル検査要約器用プロンプト =========
-
-LOCAL_LAB_SYSTEM_PROMPT = """
-あなたはユーザーのマシン上でローカルに動作する医療検査レポート要約器です。
-
-【絶対ルール】
-- 出力はJSON構造のみ。それ以外は一切出力禁止。
-- 説明文、注釈、コメント、マークダウン記法は禁止。
-- バッククォート(```)で囲まない。
-- 回答は必ず { で始まり } で終わること。
-
-【出力サンプル】
-{"overall_assessment":"血糖値とHbA1cが高値で糖尿病の可能性があります。肝機能は正常範囲内です。","notable_abnormal_results":[{"test":"空腹時血糖","value":"142","unit":"mg/dL","reference_range":"70-109","severity":"moderate"},{"test":"HbA1c","value":"7.2","unit":"%","reference_range":"4.6-6.2","severity":"moderate"}]}
-
-【出力スキーマ】
-- overall_assessment: 短い平易な日本語での要約（文字列）
-- notable_abnormal_results: 異常値の配列
-  - test: 検査項目名（文字列）
-  - value: 検査値（文字列）
-  - unit: 単位（文字列またはnull）
-  - reference_range: 基準値範囲（文字列またはnull）
-  - severity: mild|moderate|severe
-
-フィールドが不明な場合はnullを使用してください。値を捏造しないでください。
-""".strip()
-
-
-# ========= ローカルツール: 検査レポート要約 =========
-
-@ai_function(
-    name="summarize_lab_report",
-    description=(
-        "ユーザーのGPU上で動作するローカルモデルを使用して、検査レポートを構造化された異常値に要約します。"
-        "検査結果の分析が必要な場合に使用してください。"
-        "機密データはローカルで処理され、匿名化されたサマリーのみが返されます。"
-    ),
-)
-def summarize_lab_report(
-    user_query: Annotated[str, Field(description="ユーザーの質問や症状の説明。検査結果に関連する質問を含めてください。")],
-) -> Dict[str, Any]:
-    """
-    ツール: Foundry Local (Phi-4-mini) を使用してユーザーのGPU上で検査レポートを要約する。
-
-    機密データ（検査レポート）はローカルファイルから直接読み込み、
-    クラウドには匿名化・構造化されたサマリーのみを返す。
-
-    JSON互換のdictを返す：
-    - overall_assessment: 短いテキスト要約
-    - notable_abnormal_results: 異常検査結果のオブジェクトリスト
-    """
-    # ローカルファイルから機密データを読み込む
-    data_file = Path(__file__).parent / "data" / "lab_report.txt"
-    if data_file.exists():
-        lab_text = data_file.read_text(encoding="utf-8").strip()
-    else:
-        return {
-            "overall_assessment": "検査レポートが見つかりません。",
-            "notable_abnormal_results": []
-        }
-
-    # ユーザーの質問と検査データを組み合わせてローカルLLMに渡す
-    combined_content = f"【ユーザーの質問】\n{user_query}\n\n【検査レポート】\n{lab_text}"
-
-    # Foundry Localを呼び出し（入力はllm_loggerに記録される）
-    response, log_entry = call_local_model(
-        system_prompt=LOCAL_LAB_SYSTEM_PROMPT,
-        user_content=combined_content,
-        max_tokens=1024,
-        temperature=0.2,
-        tool_name="summarize_lab_report",
-    )
-
-    # レスポンスからコンテンツを抽出
-    content_text = extract_content(response)
-
-    # JSONをパース
-    lab_summary = parse_json_response(content_text)
-
-    # 出力をログに記録
-    llm_logger.log_response(log_entry, content_text, lab_summary)
-
-    return lab_summary
-
-
