@@ -6,15 +6,21 @@ OpenAI互換のChat Completions APIを使用。
 """
 
 import json
+import os
 from typing import Any, Dict, Optional
 
 import requests
+from dotenv import load_dotenv
 
 from .llm_logger import LLMLogEntry, llm_logger
 
+# .env ファイルから環境変数を読み込み
+load_dotenv()
+
 # Foundry Local エンドポイント設定
-# `foundry service status` コマンドで確認可能
-FOUNDRY_LOCAL_BASE = "http://127.0.0.1:56234"
+# 環境変数 FOUNDRY_LOCAL_URL から読み取り（`foundry service status` で確認可能）
+# 例: FOUNDRY_LOCAL_URL=http://127.0.0.1:53032
+FOUNDRY_LOCAL_BASE = os.getenv("FOUNDRY_LOCAL_URL", "http://127.0.0.1:5273")
 FOUNDRY_LOCAL_CHAT_URL = FOUNDRY_LOCAL_BASE + "/v1/chat/completions"
 
 # 動作確認済みモデルID（`foundry model list`で確認）
@@ -71,6 +77,13 @@ def call_local_model(
         "Content-Type": "application/json",
     }
 
+    # デバッグ: Foundry Local INPUT を標準出力に表示（JSON全体）
+    print(f"\n{'='*60}")
+    print(f"[Foundry Local] INPUT - Tool: {tool_name}")
+    print(f"{'='*60}")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"{'='*60}\n")
+
     resp = requests.post(
         FOUNDRY_LOCAL_CHAT_URL,
         headers=headers,
@@ -79,7 +92,16 @@ def call_local_model(
     )
 
     resp.raise_for_status()
-    return resp.json(), log_entry
+    response_json = resp.json()
+
+    # デバッグ: Foundry Local OUTPUT を標準出力に表示
+    print(f"\n{'='*60}")
+    print(f"[Foundry Local] OUTPUT - Tool: {tool_name}")
+    print(f"{'='*60}")
+    print(json.dumps(response_json, indent=2, ensure_ascii=False))
+    print(f"{'='*60}\n")
+
+    return response_json, log_entry
 
 
 def extract_content(response: Dict[str, Any]) -> str:

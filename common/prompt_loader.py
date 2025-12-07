@@ -138,7 +138,7 @@ def get_prompts_for_agent(agent_type: str, base_dir: Optional[Path] = None) -> l
     特定のエージェントタイプ用のプロンプト一覧を取得する。
 
     Args:
-        agent_type: "finance" または "medical"
+        agent_type: エージェントタイプ（例: "medical"）
         base_dir: プロジェクトのベースディレクトリ（デフォルトはこのファイルの親の親）
 
     Returns:
